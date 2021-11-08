@@ -36,6 +36,7 @@ def _parse_args():
     args = parser.parse_args()
     return args
 
+
 class HandTracking:
     def __init__(self) -> None:
         self.mp_hands = mp.solutions.hands
@@ -78,6 +79,7 @@ class HandTracking:
                 if id in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20]:
                     cv2.circle(blank, (x, y), 5, (255, 0, 255), cv2.FILLED)
         return (lms, blank)
+
 
 class Create:
     def __init__(self, cam, size, user) -> None:
@@ -198,6 +200,7 @@ class Create:
 
         # Once the model is fitted we save the model using model.save()  function.
         model.save('best_model_dataflair3.h5')
+
 
 class Predict:
     def __init__(self, cam, model_path, word_dict) -> None:
