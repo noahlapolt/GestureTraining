@@ -11,6 +11,9 @@ from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import QIcon, QPixmap, QImage
 
+# Custom imports.
+import models
+
 # TODO: Let user see what is set edit and remove them.
 # TODO: Make calibration window not use popup windows for new elements.
 # TODO: Add newtwork to manage classification.
@@ -25,15 +28,19 @@ class CalibrationUI(QMainWindow):
 
         # Checks if the file exists.
         if not os.path.exists('data.json'):
-            f = open("data.json", "w+")
-            f.write('{}')
-            self.key_tree = json.load(f)
-            f.close()
+            with open("data.json", "w+") as f:
+                f.write('{}')
+                self.key_tree = json.load(f)
         else:
             # Updates key tree if there is data.
-            f = open("data.json", "r")
-            self.key_tree = json.load(f)
-            f.close()
+            with open("data.json", "r") as f:
+                self.key_tree = json.load(f)
+
+        # Loads the model.
+        self.options = list(self.key_tree.keys())
+        self.model = models.FFN(80, len(self.options))
+        self.predict = len(self.options) > 0
+        self.train = False
 
         # Window settings.
         self.setWindowTitle("Hand Mouse Calibration")
@@ -154,11 +161,19 @@ class Menu(QMenuBar):
         '''
         Saves all elements to file.
         '''
-        f = open("data.json", "w+")
-        to_save = json.dumps(self.parent.key_tree, indent=4, sort_keys=True)
-        f.write(to_save)
-        f.close()
+        # Saves data.
+        with open("data.json", "w+") as f:
+            to_save = json.dumps(self.parent.key_tree, indent=4, sort_keys=True)
+            f.write(to_save)
+
+        # Updates tree based on the save.
+        with open("data.json", "r") as f:
+            self.parent.key_tree = json.load(f)
+
+        # Updates options and title.
         self.parent.setWindowTitle("Hand Mouse Calibration")
+        self.parent.options = list(self.parent.key_tree.keys())
+        self.parent.train = True
 
     def update_action(self, action):
         '''
@@ -188,8 +203,9 @@ class Menu(QMenuBar):
             # Gets hand and updates it.
             dist = self.parent.content.get_dists()
             if len(dist) > 0:
-                future_action.append(dist)
-                QTimer.singleShot(500, lambda: self.collect_data(action, i+1, future_action))
+                temp = future_action.copy()
+                temp.append(dist)
+                QTimer.singleShot(500, lambda: self.collect_data(action, i+1, temp))
             # Cancels tree update.
             else:
                 self.pop_up.set_text('Hand left screen, calibration canceled.')
@@ -205,6 +221,7 @@ class Menu(QMenuBar):
         '''
         Shows the content as a pop up window
         '''
+        self.parent.predict = False
         self.set_menu = content
         content.show()
 
@@ -334,7 +351,38 @@ class Content(QObject):
             qt_img = qt_img.rgbSwapped()
 
             # Updates image.
-            self.parent.label.setPixmap(QPixmap.fromImage(qt_img))
+            if not self.parent.isHidden():
+                self.parent.label.setPixmap(QPixmap.fromImage(qt_img))
+            
+            # Make the hand prediction.
+            if self.parent.predict and len(self.parent.options) > 0:
+                dist = self.get_dists()
+                if len(dist) >= 20:
+                    dist.extend([0] * 20) if len(dist) < 40 else dist
+                    pred = models.predict_ffn(dist, self.parent.model)
+                    if pred[1] > 0.99:
+                        print(self.parent.options[pred[0]])
+
+            # Trains the model.
+            if self.parent.train:
+                self.parent.train = False
+                if not self.parent.isHidden():
+                    self.parent.label.setText('Training')
+
+                # Sends the data to the model to train it.
+                data = []
+                targets = []
+                for i, key in enumerate(self.parent.key_tree):
+                    eles = self.parent.key_tree[key]
+                    for ele in eles:
+                        target = [0] * len(self.parent.options)
+                        ele.extend([0] * 20) if len(ele) < 40 else ele
+                        data.append(ele)
+                        target[i] = 1
+                        targets.append(target)
+
+                # Updates our model. (saves it too)
+                self.parent.model = models.train_ffn(data, targets, 80, len(self.parent.key_tree))
 
 
 class SetKeyMenu(QWidget):
@@ -382,6 +430,7 @@ class SetKeyMenu(QWidget):
             The event that caused the event to fire.
         '''
         self.parent.get_key = False
+        self.parent.predict = True
 
 
 class SetMacroMenu(QWidget):
@@ -506,6 +555,7 @@ class SetMacroMenu(QWidget):
             The event that caused the event to fire.
         '''
         self.parent.get_macro = False
+        self.parent.predict = True
 
 
 class PopUp(QWidget):
@@ -546,7 +596,7 @@ class HandTracking:
 
     def find_hands(self, img):
         self.results = self.hands.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        if self.results.multi_hand_landmarks:
+        if self.results.multi_hand_landmarks is not None:
             for hand_lms in self.results.multi_hand_landmarks:
                 connections = self.mp_hands.HAND_CONNECTIONS
                 self.mp_draw.draw_landmarks(img, hand_lms, connections)
@@ -554,11 +604,12 @@ class HandTracking:
 
     def find_landmarks(self):
         lms = []
-        for hand_lm in self.results.multi_hand_landmarks:
-            hand = []
-            for lm in hand_lm.landmark:
-                hand.append((lm.x, lm.y, lm.z))
-            lms.append(hand)
+        if self.results.multi_hand_landmarks is not None:
+            for hand_lm in self.results.multi_hand_landmarks:
+                hand = []
+                for lm in hand_lm.landmark:
+                    hand.append((lm.x, lm.y, lm.z))
+                lms.append(hand)
         return lms
 
 # Starts everything up.
