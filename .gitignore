@@ -1,5 +1,5 @@
-.env
-data.json
-.vscode
-model.ct
 __pycache__
+.env
+.vscode
+data.json
+model.ct
