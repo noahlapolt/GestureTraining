@@ -1,40 +1,540 @@
-import os
-import csv
+import sys
 import cv2
-import keras
-import argparse
-import math as m
-import numpy as np
+import time
 import mediapipe as mp
-from scipy import stats
-import tensorflow as tf
-from keras.models import Sequential
-from keras.callbacks import EarlyStopping
-from keras.callbacks import ReduceLROnPlateau
-from tensorflow.keras.optimizers import Adam, SGD
-from keras.preprocessing.image import ImageDataGenerator
-from keras.layers import Dense, Flatten, Conv2D, MaxPool2D
+from pynput import keyboard
+import math as m
+import json
+import os
 
-def _parse_args():
-    """
-    Command-line arguments.
-    :return: the parsed args bundle
-    """
-    parser = argparse.ArgumentParser(description='create.py')
+from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer
+from PyQt5.QtWidgets import *
+from PyQt5.QtGui import QIcon, QPixmap, QImage
 
-    # Element change options.
-    parser.add_argument('--elements', nargs='+', help='symbole to train for')
-    parser.add_argument('--device', default=0, type=int, help='which camera to use')
-    parser.add_argument('--train', dest='train', default=False, action='store_true', help='if the model should train or not')
-    parser.add_argument('--retrain', dest='retrain', default=False, action='store_true', help='retrains for a specific value')
-    parser.add_argument('--sample_size', default=700, type=int, help='the number of images to take for each element to train')
-    parser.add_argument('--train_no', dest='train_no', default=False, action='store_true', help='retrains using the data in the folders')
-    parser.add_argument('--data_start', default=0, type=int, help='trains new data names files starting at this number')
-    parser.add_argument('--user', required=True, type=str, help='the user the data is being trained for')
-    
-    # Makes output
-    args = parser.parse_args()
-    return args
+# TODO: Let user see what is set edit and remove them.
+# TODO: Make calibration window not use popup windows for new elements.
+# TODO: Add newtwork to manage classification.
+# TODO: Let window be resizeable.
+
+class CalibrationUI(QMainWindow):
+    '''
+    Brings together the menu and the calibration images.
+    '''
+    def __init__(self):
+        super().__init__()
+
+        # Checks if the file exists.
+        if not os.path.exists('data.json'):
+            f = open("data.json", "w+")
+            f.write('{}')
+            self.key_tree = json.load(f)
+            f.close()
+        else:
+            # Updates key tree if there is data.
+            f = open("data.json", "r")
+            self.key_tree = json.load(f)
+            f.close()
+
+        # Window settings.
+        self.setWindowTitle("Hand Mouse Calibration")
+        self.resize(1280, 720)
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        self.tray_quit = False
+
+        # Image target.
+        self.label = QLabel(self)
+
+        # Keyboard controler.
+        self.key_ctrl = keyboard.Controller()
+        self.get_key = False
+        self.get_macro = False
+
+        # Thread for content to update on.
+        self.thread = QThread()
+        self.content = Content(self)
+        self.content.moveToThread(self.thread)
+        self.thread.started.connect(self.content.update_loop)
+        
+        # Setup window.
+        self.menu = Menu(self)
+        self.setMenuBar(self.menu)
+        self.setCentralWidget(self.label)
+        self.thread.start()
+
+        # Tray setup
+        tray_menu = QMenu(self)
+        cali_action = QAction('Calibrate', self)
+        cali_action.triggered.connect(self.cali_action)
+        quit_action = QAction('Quit', self)
+        quit_action.triggered.connect(self.tray_quit_action)
+        tray_menu.addAction(cali_action)
+        tray_menu.addSeparator()
+        tray_menu.addAction(quit_action)
+        self.tray.setContextMenu(tray_menu)
+
+    def closeEvent(self, event):
+        if self.tray_quit:
+            self.content.stop()
+            self.thread.quit()
+        else:
+            event.ignore()
+            self.tray.show()
+            self.hide()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.WindowStateChange:
+            if self.windowState() and Qt.WindowMinimized:
+                self.tray.show()
+                self.hide()
+
+    def cali_action(self):
+        '''
+        Brings the calibration window back.
+        '''
+        self.show()
+        self.tray.hide()
+
+    def tray_quit_action(self):
+        '''
+        Closes the window when the user quits it from the icon.
+        '''
+        self.tray_quit = True
+        self.close()
+
+
+class Menu(QMenuBar):
+    '''
+    Top menu to save settings.
+    '''
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+
+        self.set_key = SetKeyMenu(parent)
+        self.set_macro = SetMacroMenu(parent)
+        self.set_menu = None
+
+        # Top of menu.
+        file_menu = QMenu("File", self)
+        set_menu = QMenu("Set", self)
+        set_mouse = QMenu("Mouse", self)
+        set_button = QAction("Key",self)
+        set_button.triggered.connect(lambda: self.show_menu(self.set_key))
+        set_macro = QAction("Macro", self)
+        set_macro.triggered.connect(lambda: self.show_menu(self.set_macro))
+
+        # Buttons to update mouse.
+        set_tracking = QAction("Tracking", self)
+        set_tracking.triggered.connect(lambda: self.update_action("MMOVE"))
+        set_left_mouse = QAction("Left Button", self)
+        set_left_mouse.triggered.connect(lambda: self.update_action("MLEFT"))
+        set_right_mouse = QAction("Right Button", self)
+        set_right_mouse.triggered.connect(lambda: self.update_action("MRIGHT"))
+        set_scroll = QAction("Scroll", self)
+        set_scroll.triggered.connect(lambda: self.update_action("MSCROLL"))
+
+        # Save setup
+        save_file = QAction("Save", self)
+        save_file.triggered.connect(self.save_action)
+
+        # Adds all options to the menu.
+        set_mouse.addAction(set_tracking)
+        set_mouse.addAction(set_left_mouse)
+        set_mouse.addAction(set_right_mouse)
+        set_mouse.addAction(set_scroll)
+        set_menu.addMenu(set_mouse)
+        set_menu.addAction(set_button)
+        set_menu.addAction(set_macro)
+        file_menu.addMenu(set_menu)
+        file_menu.addAction(save_file)
+        self.addMenu(file_menu)
+
+    def save_action(self):
+        '''
+        Saves all elements to file.
+        '''
+        f = open("data.json", "w+")
+        to_save = json.dumps(self.parent.key_tree, indent=4, sort_keys=True)
+        f.write(to_save)
+        f.close()
+        self.parent.setWindowTitle("Hand Mouse Calibration")
+
+    def update_action(self, action):
+        '''
+        Updates new key to the key tree.
+
+        Parameters
+        ----------
+        action: string
+            The key or button to save.
+
+        Returns
+        -------
+        boolean: If it updated or not.
+        '''
+        self.parent.setWindowTitle("Hand Mouse Calibration*")
+        self.pop_up = PopUp('Count Down', 'Place hand on screen in 3')
+        QTimer.singleShot(1000, lambda: self.pop_up.set_text('Place hand on screen in 2'))
+        QTimer.singleShot(2000, lambda: self.pop_up.set_text('Place hand on screen in 1'))
+        QTimer.singleShot(3000, lambda: self.pop_up.set_text('Keep hand on screen and moving.'))
+        QTimer.singleShot(3000, lambda: self.collect_data(action, 0))
+
+    def collect_data(self, action, i, future_action=[]):
+        '''
+        Collects the data from the hand.
+        '''
+        if i != 10:
+            # Gets hand and updates it.
+            dist = self.parent.content.get_dists()
+            if len(dist) > 0:
+                future_action.append(dist)
+                QTimer.singleShot(500, lambda: self.collect_data(action, i+1, future_action))
+            # Cancels tree update.
+            else:
+                self.pop_up.set_text('Hand left screen, calibration canceled.')
+                self.parent.menu.set_menu.updated.setText(action + " failed to update...")
+                QTimer.singleShot(1000, lambda: self.pop_up.close())
+        else:
+            # Updates tree.
+            self.parent.key_tree[action] = future_action
+            self.parent.menu.set_menu.updated.setText(action + " updated...")
+            self.pop_up.close()
+
+    def show_menu(self, content):
+        '''
+        Shows the content as a pop up window
+        '''
+        self.set_menu = content
+        content.show()
+
+
+class Content(QObject):
+    '''
+    Displays the camera input for the calibration.
+    '''
+    def __init__(self, parent):
+        '''
+        Builds the Content for the screen.
+
+        Parameters
+        ----------
+        parent: PyQt5Widget
+            The Qt element right above this object.
+        '''
+        super().__init__()
+        self.cam = cv2.VideoCapture(0)
+        self.ht = HandTracking()
+        self.parent = parent
+        self.listener = keyboard.Listener(on_press=self.on_press)
+        
+        # Camera settings
+        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+        # Determinds the fps of the camera if it could not be found.
+        if self.cam.get(cv2.CAP_PROP_FPS) == 0:
+            start_time = time.gmtime().tm_sec
+            num_frames = 0
+            
+            # Times the fps.
+            while ((start_time + 1) % 60 >= time.gmtime().tm_sec and time.gmtime().tm_sec != 59):
+                self.cam.read()
+                num_frames += 1
+            
+            # Sets the cam fps.
+            self.cam.set(cv2.CAP_PROP_FPS, num_frames)
+
+        # Updates the camera.
+        self.running = self.cam.isOpened()
+        self.listener.start()
+
+    def on_press(self, key):
+        res = str(key).strip("\'").replace("Key.", "").upper()
+        
+        # Prevents missing '.
+        if res == "":
+            res = "\'"
+
+        if self.parent.get_key:
+            self.parent.menu.set_key.text_box.setText(res)
+        if self.parent.get_macro:
+            self.parent.menu.set_macro.active.setText(res)
+
+    def stop(self):
+        '''
+        Stops the video feed.
+        '''
+        self.running = False
+        self.cam.release()
+        self.listener.stop()
+        cv2.destroyAllWindows()
+
+    def get_dists(self):
+        '''
+        Function to get the current distances to save as a profile.
+        
+        Returns
+        -------
+        float[]: List of all distances between important joints.
+        '''
+        lms = self.ht.find_landmarks()
+        dists = []
+
+        for i in range(len(lms)):
+            if len(lms[i]) >= 20:
+                # Collects distances from joints.
+                base = m.dist(lms[i][0], lms[i][5])
+                dists.append(m.dist(lms[i][0], lms[i][1])/base)
+                dists.append(m.dist(lms[i][1], lms[i][2])/base)
+                dists.append(m.dist(lms[i][2], lms[i][3])/base)
+                dists.append(m.dist(lms[i][3], lms[i][4])/base)
+                dists.append(m.dist(lms[i][0], lms[i][5])/base)
+                dists.append(m.dist(lms[i][5], lms[i][6])/base)
+                dists.append(m.dist(lms[i][6], lms[i][7])/base)
+                dists.append(m.dist(lms[i][7], lms[i][8])/base)
+                dists.append(m.dist(lms[i][0], lms[i][9])/base)
+                dists.append(m.dist(lms[i][9], lms[i][10])/base)
+                dists.append(m.dist(lms[i][10], lms[i][11])/base)
+                dists.append(m.dist(lms[i][11], lms[i][12])/base)
+                dists.append(m.dist(lms[i][0], lms[i][13])/base)
+                dists.append(m.dist(lms[i][13], lms[i][14])/base)
+                dists.append(m.dist(lms[i][14], lms[i][15])/base)
+                dists.append(m.dist(lms[i][15], lms[i][16])/base)
+                dists.append(m.dist(lms[i][0], lms[i][17])/base)
+                dists.append(m.dist(lms[i][17], lms[i][18])/base)
+                dists.append(m.dist(lms[i][18], lms[i][19])/base)
+                dists.append(m.dist(lms[i][19], lms[i][20])/base)
+
+        return dists
+
+    def update_loop(self):
+        '''
+        Gets the current image and displays it in the content.
+        '''
+        while self.running:
+            _, frame = self.cam.read()
+            frame = cv2.flip(frame, 1)
+
+            # Checking if we are able to detect the hand...
+            img = self.ht.find_hands(frame)
+
+            # Gets image format
+            if img.shape[2] == 4:
+                qformat=QImage.Format_RGBA8888
+            else:
+                qformat=QImage.Format_RGB888
+
+            # Makes image into Qt image.
+            qt_img = QImage(img.data,
+                img.shape[1],
+                img.shape[0], 
+                img.strides[0],
+                qformat)
+            qt_img = qt_img.rgbSwapped()
+
+            # Updates image.
+            self.parent.label.setPixmap(QPixmap.fromImage(qt_img))
+
+
+class SetKeyMenu(QWidget):
+    def __init__(self, parent):
+        '''
+        Creates the set key menu.
+
+        Parameters
+        ----------
+        parent: PyQtElement
+            The very top level element of the menu system.
+        '''
+        super().__init__()
+        self.setWindowTitle("Set Key")
+        self.parent = parent
+        self.parent.get_key = True
+
+        # Set key button.
+        set_key = QPushButton("Set Key", self)
+        set_key.clicked.connect(lambda: self.parent.menu.update_action(self.text_box.text()))
+
+        # Key display
+        self.text_box = QLineEdit(self)
+        self.text_box.setReadOnly(True)
+
+        # Update display
+        self.updated = QLabel("Waiting...",self)
+
+        # Layout
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Press key to set:", self))
+        layout.addWidget(self.text_box)
+        layout.addWidget(self.updated)
+        layout.addWidget(set_key)
+        self.setLayout(layout)
+        
+
+    def closeEvent(self, event):
+        '''
+        Stops getting key strokes.
+
+        Parameters
+        ----------
+        event: PyQtEvent
+            The event that caused the event to fire.
+        '''
+        self.parent.get_key = False
+
+
+class SetMacroMenu(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.setWindowTitle('Set Macro')
+        self.parent = parent
+        self.parent.get_macro = True
+        self.text_boxes = []
+        self.keys = []
+        self.delays = []
+        self.target = 0
+        self.active = None
+
+        # Buttons.
+        buttons = QWidget(self)
+        but_lay = QHBoxLayout()
+        set_macro = QPushButton('Set Macro', self)
+        set_macro.clicked.connect(self.set_macro)
+        add_key = QPushButton('Add Key',self)
+        add_key.clicked.connect(self.add_key)
+        del_key = QPushButton('Delet Key', self)
+        del_key.clicked.connect(self.del_key)
+
+        # Button layout.
+        but_lay.addWidget(add_key)
+        but_lay.addWidget(set_macro)
+        but_lay.addWidget(del_key)
+        buttons.setLayout(but_lay)
+        
+
+        # Update display
+        self.updated = QLabel('Waiting...',self)
+        self.label = QLabel('Editing Key 1:', self)
+
+        # Layout
+        self.layout = QVBoxLayout()
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.updated)
+        self.layout.addWidget(buttons)
+        self.setLayout(self.layout)
+        self.add_key()
+
+    def add_key(self):
+        '''
+        Adds a key to the macro.
+        '''
+        # Key display
+        key_in = QWidget(self)
+        key_in_layout = QHBoxLayout()
+        text_box = QLineEdit(key_in)
+        text_box.setReadOnly(True)
+        delay = QSpinBox(key_in)
+        delay.setRange(0, 99999)
+        ms = QLabel('ms',key_in)
+        cur = len(self.text_boxes)
+        edit = QPushButton(key_in)
+        edit.setIcon(QIcon(QPixmap('assets/edit.png')))
+        edit.clicked.connect(lambda: self.edit_btn(cur))
+
+        # Sets the layout up.
+        key_in_layout.addWidget(text_box,stretch=3)
+        key_in_layout.addWidget(delay,stretch=2)
+        key_in_layout.addWidget(ms,stretch=1)
+        key_in_layout.addWidget(edit,stretch=1)
+        key_in.setLayout(key_in_layout)
+
+        # Updates key array and active.
+        self.keys.append(key_in)
+        self.delays.append(delay)
+        self.text_boxes.append(text_box)
+        self.active = text_box
+        self.target = cur
+        self.layout.insertWidget(len(self.text_boxes),key_in)
+        self.label.setText(f'Editing Key {self.target+1}:')
+
+    def set_macro(self):
+        '''
+        Sets the macro in the key tree.
+        '''
+        macro_str = 'Macro:'
+        for i in range(len(self.keys)):
+            macro_str += f' {self.text_boxes[i].text()}:{self.delays[i].value()}'
+        self.parent.menu.update_action(macro_str)
+
+    def del_key(self):
+        '''
+        Deletes a key.
+        '''
+        if len(self.keys) > 1:
+            self.delays.pop(self.target)
+            self.text_boxes.pop(self.target)
+            self.keys.pop(self.target).deleteLater()
+            
+            if self.target >= len(self.keys):
+                self.target = len(self.keys) - 1
+            
+            self.active = self.text_boxes[self.target]
+            self.label.setText(f'Editing Key {self.target+1}:')
+
+    def edit_btn(self, target):
+        '''
+        Informs the user of what they are
+        currently editing and changes the target.
+
+        Parameters
+        ----------
+        target: int
+            The index of the text box that will be edited.
+        '''
+        self.active = self.text_boxes[target]
+        self.label.setText(f'Editing Key {target+1}:')
+        self.target = target
+
+    def closeEvent(self, event):
+        '''
+        Stops getting key strokes.
+
+        Parameters
+        ----------
+        event: PyQtEvent
+            The event that caused the event to fire.
+        '''
+        self.parent.get_macro = False
+
+
+class PopUp(QWidget):
+    '''
+    Class display a popup menu.
+    '''
+    def __init__(self, title, text):
+        '''
+        Creates the initial popup.
+
+        Parameters
+        ----------
+        title: str
+            The title of the popup window.
+        text: str
+            The text to display in the popup window.
+        '''
+        super().__init__()
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowTitle(title)
+        layout = QHBoxLayout(self)
+        self.label = QLabel(text, self)
+        layout.addWidget(self.label)
+        self.setLayout(layout)
+        self.show()
+
+
+    def set_text(self, text):
+        self.label.setText(text)
 
 
 class HandTracking:
@@ -52,329 +552,19 @@ class HandTracking:
                 self.mp_draw.draw_landmarks(img, hand_lms, connections)
         return img
 
-    def get_points(self, lms, points=(0, 5, 4, 8, 20)):
-        result = np.zeros((len(points), 2))
-        for idx, point in enumerate(points):
-            result[idx][0], result[idx][1] = lms[point][1], lms[point][2]
-        return result
-    
-    def get_dists(self, lms, points, root=0):
-        rootx, rooty = lms[root][1], lms[root][2]
-        result = np.zeros(len(points))
-        for idx, point in enumerate(points):
-            distx = np.abs(point[0] - rootx)
-            disty = np.abs(point[1] - rooty)
-            result[idx] = m.hypot(distx, disty)
-        return result
-
-    def find_landmarks(self, img):
+    def find_landmarks(self):
         lms = []
-        blank = np.zeros(img.shape)
-        if self.results.multi_hand_landmarks:
-            hand = self.results.multi_hand_landmarks[0]
-            for id, lm in enumerate(hand.landmark):
-                h, w = img.shape[:2]
-                x, y = int(lm.x * w), int(lm.y * h)
-                lms.append((id, x, y))
-                if id in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20]:
-                    cv2.circle(blank, (x, y), 5, (255, 0, 255), cv2.FILLED)
-        return (lms, blank)
+        for hand_lm in self.results.multi_hand_landmarks:
+            hand = []
+            for lm in hand_lm.landmark:
+                hand.append((lm.x, lm.y, lm.z))
+            lms.append(hand)
+        return lms
 
-
-class Create:
-    def __init__(self, cam, size, user) -> None:
-        self.ht = HandTracking()
-        self.user = user
-        self.cam = cam
-        self.size = size
-        self.fps = self.cam.get(cv2.CAP_PROP_FPS)
-
-    # L E enter(ok) d r
-    def create_data(self, element, start=0) -> None:
-        # Reset variables.
-        num_frames = 0
-        num_imgs_taken = 0
-        seconds = 0
-
-        # Data collection loop.
-        while True:
-            seconds = int(num_frames / self.fps)
-            _, frame = self.cam.read()
-            # flipping the frame to prevent inverted image of captured frame...
-            frame = cv2.flip(frame, 1)
-            frame_copy = frame.copy()
-
-            if seconds <= 1:
-                cv2.putText(frame_copy, "Collecting data for " + element + " in 5", (80, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,255), 2)
-            elif seconds == 2:
-                cv2.putText(frame_copy, "Collecting data for " + element + " in 4", (80, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,255), 2)
-            elif seconds == 3:
-                cv2.putText(frame_copy, "Collecting data for " + element + " in 3", (80, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,255), 2)
-            elif seconds == 4:
-                cv2.putText(frame_copy, "Collecting data for " + element + " in 2", (80, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,255), 2)
-            elif seconds == 5:
-                cv2.putText(frame_copy, "Collecting data for " + element + " in 1", (80, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,0,255), 2)        
-            else:
-                # Checking if we are able to detect the hand...
-                img = self.ht.find_hands(frame)
-                lms, blank = self.ht.find_landmarks(img)
-                if len(lms) > 0:
-                    hand = np.around(self.ht.get_points(lms, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]))
-                    x = 10000
-                    y = 10000 
-                    w = -1
-                    h = -1
-                    for pos in hand:
-                        if x > 5000 or pos[0] < x:
-                            x = int(pos[0]) - 20
-                        if y > 5000 or pos[1]< y:
-                            y = int(pos[1]) - 20
-                        if w < 0 or pos[0] > w:
-                            w = int(pos[0]) + 20
-                        if h < 0 or pos[1] > h:
-                            h = int(pos[1]) + 20
-
-                    # Reforms blank
-                    blank = blank[y:h,x:w,:]
-                    if 0 not in blank.shape:
-                        blank = cv2.resize(blank, (128, 128))
-
-                        if num_imgs_taken <= self.size:
-                            cv2.imwrite(r".\\gesture\\train\\"+self.user+"\\"+element+"\\" +
-                            str(num_imgs_taken+start) + '.jpg', blank)
-                        elif num_imgs_taken <= 40 + self.size:
-                            cv2.imwrite(r".\\gesture\\test\\"+self.user+"\\"+element+"\\" +
-                            str(num_imgs_taken-self.size+start) + '.jpg', blank)
-                        else:
-                            break
-
-                        # Displays the image.
-                        cv2.rectangle(img, (x, y), (w,h), (255, 0, 0), 1)
-                        cv2.putText(img, 'Hand detected collected ' + str(num_imgs_taken) + ' images.', (25, 400), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                        cv2.imshow("Sign Detection", img)
-                        num_imgs_taken +=1
-                else:
-                    cv2.putText(frame_copy, 'No hand detected...', (200, 400), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                    
-                    # Dislpays the image.
-                    cv2.imshow("Sign Detection", frame_copy)
-            
-            # Dislpays the image.
-            if seconds <= 5:
-                cv2.imshow("Sign Detection", frame_copy)
-
-            # increment the number of frames for tracking
-            num_frames += 1
-
-            # Closing windows with Esc key...(any other key with ord can be used too.)
-            k = cv2.waitKey(1) & 0xFF
-            if k == 27:
-                break
-        
-    def train_data(self, out_size) -> None:
-        train_path = r'.\gesture\train\\'+self.user
-        test_path = r'.\gesture\test\\'+self.user
-        train_batches = ImageDataGenerator(preprocessing_function=tf.keras.applications.vgg16.preprocess_input).flow_from_directory(directory=train_path, target_size=(128,128), class_mode='categorical', batch_size=10,shuffle=True)
-        test_batches = ImageDataGenerator(preprocessing_function=tf.keras.applications.vgg16.preprocess_input).flow_from_directory(directory=test_path, target_size=(128,128), class_mode='categorical', batch_size=10, shuffle=True)
-
-        model = Sequential()
-        model.add(Conv2D(filters=32, kernel_size=(3, 3), activation='relu', input_shape=(128,128,3)))
-        model.add(MaxPool2D(pool_size=(2, 2), strides=2))
-        model.add(Conv2D(filters=64, kernel_size=(3, 3), activation='relu', padding = 'same'))
-        model.add(MaxPool2D(pool_size=(2, 2), strides=2))
-        model.add(Conv2D(filters=128, kernel_size=(3, 3), activation='relu', padding = 'valid'))
-        model.add(MaxPool2D(pool_size=(2, 2), strides=2))
-        model.add(Flatten())
-        model.add(Dense(32,activation ="relu"))
-        model.add(Dense(64,activation ="relu"))
-        model.add(Dense(64,activation ="relu"))
-        model.add(Dense(out_size,activation ="softmax"))
-
-        model.compile(optimizer=Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=1, min_lr=0.0001)
-        early_stop = EarlyStopping(monitor='val_loss', min_delta=0, patience=2, verbose=0, mode='auto')
-        model.compile(optimizer=SGD(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=1, min_lr=0.0005)
-        early_stop = EarlyStopping(monitor='val_loss', min_delta=0, patience=2, verbose=0, mode='auto')
-        model.fit(train_batches, epochs=10, callbacks=[reduce_lr, early_stop], validation_data = test_batches)
-
-        # Once the model is fitted we save the model using model.save()  function.
-        model.save('best_model_dataflair3.h5')
-
-
-class Predict:
-    def __init__(self, cam, model_path, word_dict) -> None:
-        self.ht = HandTracking()
-        self.cam = cam
-        self.fps = self.cam.get(cv2.CAP_PROP_FPS)
-        self.model = keras.models.load_model(model_path)
-        self.word_dict = word_dict
-
-    def predict(self):
-        # Resets values
-        num_frames = 0
-
-        while True:
-            _, frame = self.cam.read()
-            frame = cv2.flip(frame, 1)
-                
-            # Checking if we are able to detect the hand...
-            img = self.ht.find_hands(frame)
-            lms, blank = self.ht.find_landmarks(img)
-
-            # Gets hand.
-            if len(lms) > 0:
-                # Output the prediction.
-                hand = np.around(self.ht.get_points(lms, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]))
-                x = 10000
-                y = 10000 
-                w = -1
-                h = -1
-                for pos in hand:
-                    if x > 5000 or pos[0] < x:
-                        x = int(pos[0]) - 20
-                    if y > 5000 or pos[1] < y:
-                        y = int(pos[1]) - 20
-                    if w < 0 or pos[0] > w:
-                        w = int(pos[0]) + 20
-                    if h < 0 or pos[1] > h:
-                        h = int(pos[1]) + 20
-
-                # The prediction.
-                blank = blank[y:h,x:w,:]
-                if 0 not in blank.shape:
-                    blank = cv2.resize(blank, (128, 128))
-                    cv2.imshow("Resized Image", blank)
-                    blank = np.reshape(blank,(1,blank.shape[0],blank.shape[1],3))
-                    pred = self.model.predict(blank)
-
-                    # Prediction
-                    pred = self.model.predict(blank)
-                    cv2.rectangle(img, (x, y), (w,h), (255, 0, 0), 1)
-
-                    if np.amax(pred) > 0.95:
-                        cv2.putText(img, self.word_dict[np.argmax(pred)], (170, 45), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                    else:
-                        cv2.putText(img, 'None', (170, 45), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-            else:
-                cv2.putText(img, 'None', (170, 45), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-
-            # incrementing the number of frames for tracking
-            num_frames += 1
-            # Display the frame with segmented hand
-            cv2.imshow("Sign Detection", img)
-            # Close windows with Esc
-            k = cv2.waitKey(1) & 0xFF
-            if k == 27:
-                break
-
-
+# Starts everything up.
 if __name__ == '__main__':
-    # Initial variables
-    word_dict = {}
-    args = _parse_args()
-    cam = cv2.VideoCapture(args.device)
-
-    # Checks if a model and word dictionary are already present.
-    if not (os.path.exists('best_model_dataflair3.h5') and os.path.exists('word_dict')) or args.train:
-        # Builds the creator.
-        creator = Create(cam, args.sample_size, args.user)
-
-        # Gets train data for all variables.
-        for i, ele in enumerate(args.elements):
-            # Path for the element.
-            path1 = os.path.join(os.getcwd(), 'gesture\\train\\'+args.user)
-            path2 = os.path.join(os.getcwd(), 'gesture\\test\\'+args.user)
-            if not os.path.isdir(path1):
-                os.mkdir(path1)
-            if not os.path.isdir(path2):
-                os.mkdir(path2)
-            if not os.path.isdir(os.path.join(path1, ele)):
-                os.mkdir(os.path.join(path1, ele))
-            if not os.path.isdir(os.path.join(path2, ele)):
-                os.mkdir(os.path.join(path2, ele))
-            # Creates data.
-            creator.create_data(ele, args.data_start)
-
-            # Adds word to dictionary.
-            word_dict[i] = ele
-
-        with open("word_dict", "w", newline='') as new_file:
-            # Saves the word dictonary to a csv so it can be reused.
-            w = csv.writer(new_file)
-
-            # loop over dictionary keys and values
-            for key, val in word_dict.items():
-                w.writerow([key, val])
-
-        # Trains the data.
-        creator.train_data(len(word_dict))
-    elif args.retrain:
-        # Builds the creator.
-        creator = Create(cam, args.sample_size, args.user)
-        word_dict = {}
-
-        # Loads word dictionary.
-        with open('word_dict', mode='r') as infile:
-            reader = csv.reader(infile)
-            for row in reader:
-                if row[1] not in args.elements:
-                    word_dict[int(row[0])] = row[1]
-
-        last_len = len(word_dict)
-
-        # Gets train data for all variables.
-        for i, ele in enumerate(args.elements):
-            word_dict[i+last_len] = ele
-            # Path for the element.
-            path1 = os.path.join(os.getcwd(), 'gesture\\train\\'+args.user)
-            path2 = os.path.join(os.getcwd(), 'gesture\\test\\'+args.user)
-            if not os.path.isdir(path1):
-                os.mkdir(path1)
-            if not os.path.isdir(path2):
-                os.mkdir(path2)
-            if not os.path.isdir(os.path.join(path1, ele)):
-                os.mkdir(os.path.join(path1, ele))
-            if not os.path.isdir(os.path.join(path2, ele)):
-                os.mkdir(os.path.join(path2, ele))
-            # Creates data.
-            creator.create_data(ele, args.data_start)
-
-        with open("word_dict", "w", newline='') as new_file:
-            # Saves the word dictonary to a csv so it can be reused.
-            w = csv.writer(new_file)
-
-            # loop over dictionary keys and values
-            for key, val in word_dict.items():
-                w.writerow([key, val])
-
-        # Trains the data.
-        creator.train_data(len(word_dict))
-    elif args.train_no:
-        # Builds the creator.
-        creator = Create(cam, args.sample_size, args.user)
-        word_dict = {}
-
-        # Loads word dictionary.
-        with open('word_dict', mode='r') as infile:
-            reader = csv.reader(infile)
-            for row in reader:
-                word_dict[int(row[0])] = row[1]
-
-        # Trains the data.
-        creator.train_data(len(word_dict))
-    else:
-        # Loads word dictionary.
-        with open('word_dict', mode='r') as infile:
-            reader = csv.reader(infile)
-            for row in reader:
-                word_dict[int(row[0])] = row[1]
-        
-    # Predicts the value.
-    predictor = Predict(cam, os.path.join(os.getcwd(), 'best_model_dataflair3.h5'), word_dict)
-
-    # Run predictions.
-    predictor.predict()
-
-    cv2.destroyAllWindows()
-    cam.release()
+    app = QApplication(sys.argv)
+    app.setWindowIcon(app.style().standardIcon(QStyle.SP_ComputerIcon))
+    win = CalibrationUI()
+    win.show()
+    sys.exit(app.exec_())
