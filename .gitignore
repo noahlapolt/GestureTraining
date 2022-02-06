@@ -2,3 +2,4 @@
 data.json
 .vscode
 model.ct
+__pycache__
