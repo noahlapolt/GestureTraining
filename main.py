@@ -7,17 +7,15 @@ import math as m
 import json
 import os
 
-from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer
+from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer, QRect
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import QIcon, QPixmap, QImage
 
 # Custom imports.
 import models
 
-# TODO: Let user see what is set edit and remove them.
-# TODO: Make calibration window not use popup windows for new elements.
-# TODO: Add newtwork to manage classification.
 # TODO: Let window be resizeable.
+# TODO: Prevent empty binds.
 
 class CalibrationUI(QMainWindow):
     '''
@@ -26,21 +24,28 @@ class CalibrationUI(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # Checks if the file exists.
+        # Loads in the save.
         if not os.path.exists('data.json'):
             with open("data.json", "w+") as f:
                 f.write('{}')
-                self.key_tree = json.load(f)
+                self.ele_tree = json.load(f)
         else:
             # Updates key tree if there is data.
             with open("data.json", "r") as f:
-                self.key_tree = json.load(f)
+                self.ele_tree = json.load(f)
 
         # Loads the model.
-        self.options = list(self.key_tree.keys())
-        self.model = models.FFN(80, len(self.options))
-        self.predict = len(self.options) > 0
+        if len(self.ele_tree.keys()) > 0:
+            self.model = models.FFN(80, len(self.ele_tree.keys()))
+        else:
+            self.model = None
+        self.predict = self.model is not None
         self.train = False
+
+        # Keyboard controler.
+        self.key_ctrl = keyboard.Controller()
+        self.get_key = False
+        self.get_macro = False
 
         # Window settings.
         self.setWindowTitle("Hand Mouse Calibration")
@@ -48,182 +53,380 @@ class CalibrationUI(QMainWindow):
         self.tray = QSystemTrayIcon(self)
         self.tray.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
         self.tray_quit = False
-
-        # Image target.
-        self.label = QLabel(self)
-
-        # Keyboard controler.
-        self.key_ctrl = keyboard.Controller()
-        self.get_key = False
-        self.get_macro = False
+        
+        # Builds the main screen structrure.
+        main = QWidget()
+        layout = QHBoxLayout()
+        sub_widget = QWidget()
+        sub_lay = QVBoxLayout()
+        self.tree_area = TreeArea(self)
+        self.edit_area = EditArea(self)
+        self.label = QLabel()
+        sub_lay.addWidget(self.tree_area,stretch=1)
+        sub_lay.addWidget(self.edit_area,stretch=1)
+        sub_widget.setLayout(sub_lay)
+        layout.addWidget(sub_widget, stretch=1)
+        layout.addWidget(self.label, stretch=2)
+        main.setLayout(layout)
 
         # Thread for content to update on.
         self.thread = QThread()
         self.content = Content(self)
         self.content.moveToThread(self.thread)
         self.thread.started.connect(self.content.update_loop)
-        
-        # Setup window.
-        self.menu = Menu(self)
-        self.setMenuBar(self.menu)
-        self.setCentralWidget(self.label)
-        self.thread.start()
 
         # Tray setup
         tray_menu = QMenu(self)
         cali_action = QAction('Calibrate', self)
-        cali_action.triggered.connect(self.cali_action)
+        cali_action.triggered.connect(self.view)
         quit_action = QAction('Quit', self)
-        quit_action.triggered.connect(self.tray_quit_action)
+        quit_action.triggered.connect(self.quit)
         tray_menu.addAction(cali_action)
         tray_menu.addSeparator()
         tray_menu.addAction(quit_action)
         self.tray.setContextMenu(tray_menu)
+        self.tray.show()
 
-    def closeEvent(self, event):
-        if self.tray_quit:
-            self.content.stop()
-            self.thread.quit()
-        else:
-            event.ignore()
-            self.tray.show()
-            self.hide()
+        # Top of menu.
+        menu = QMenuBar(self)
+        file_menu = QMenu('&File', menu)
+        menu.addMenu(file_menu)
+        add_menu = QMenu('&Add', menu)
+        file_menu.addMenu(add_menu)
+        save_file = QAction('&Save', menu)
+        save_file.triggered.connect(self.save)
+        file_menu.addAction(save_file)
+        quit_opt = QAction('&Quit', menu)
+        quit_opt.triggered.connect(self.quit)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_opt)
 
-    def changeEvent(self, event):
-        if event.type() == QEvent.WindowStateChange:
-            if self.windowState() and Qt.WindowMinimized:
-                self.tray.show()
-                self.hide()
+        # Set sub menu
+        add_mouse = QMenu('&Mouse', add_menu)
+        add_menu.addMenu(add_mouse)
+        add_button = QAction('&Key',add_menu)
+        add_button.triggered.connect(lambda: self.edit_area.add('Key'))
+        add_menu.addAction(add_button)
+        add_macro = QAction('&Macro',add_menu)
+        add_macro.triggered.connect(lambda: self.edit_area.add('Macro'))
+        add_menu.addAction(add_macro)
 
-    def cali_action(self):
+        # Mouse sub menu
+        add_tracking = QAction('&Tracking', add_mouse)
+        add_tracking.triggered.connect(lambda: self.edit_area.add('MOUSEMOVE'))
+        add_mouse.addAction(add_tracking)
+        add_left = QAction('&Left Button', add_mouse)
+        add_left.triggered.connect(lambda: self.edit_area.add('MOUSELEFT'))
+        add_mouse.addAction(add_left)
+        add_right = QAction('&Right Button', add_mouse)
+        add_right.triggered.connect(lambda: self.edit_area.add('MOUSERIGHT'))
+        add_mouse.addAction(add_right)
+        add_scroll = QAction('&Scroll', add_mouse)
+        add_scroll.triggered.connect(lambda: self.edit_area.add('MOUSESCROLL'))
+        add_mouse.addAction(add_scroll)
+
+        # Setup window.
+        self.setMenuBar(menu)
+        self.setCentralWidget(main)
+        self.thread.start()
+
+    def view(self):
         '''
         Brings the calibration window back.
         '''
         self.show()
-        self.tray.hide()
 
-    def tray_quit_action(self):
-        '''
-        Closes the window when the user quits it from the icon.
-        '''
-        self.tray_quit = True
-        self.close()
-
-
-class Menu(QMenuBar):
-    '''
-    Top menu to save settings.
-    '''
-    def __init__(self, parent):
-        super().__init__()
-        self.parent = parent
-
-        self.set_key = SetKeyMenu(parent)
-        self.set_macro = SetMacroMenu(parent)
-        self.set_menu = None
-
-        # Top of menu.
-        file_menu = QMenu("File", self)
-        set_menu = QMenu("Set", self)
-        set_mouse = QMenu("Mouse", self)
-        set_button = QAction("Key",self)
-        set_button.triggered.connect(lambda: self.show_menu(self.set_key))
-        set_macro = QAction("Macro", self)
-        set_macro.triggered.connect(lambda: self.show_menu(self.set_macro))
-
-        # Buttons to update mouse.
-        set_tracking = QAction("Tracking", self)
-        set_tracking.triggered.connect(lambda: self.update_action("MMOVE"))
-        set_left_mouse = QAction("Left Button", self)
-        set_left_mouse.triggered.connect(lambda: self.update_action("MLEFT"))
-        set_right_mouse = QAction("Right Button", self)
-        set_right_mouse.triggered.connect(lambda: self.update_action("MRIGHT"))
-        set_scroll = QAction("Scroll", self)
-        set_scroll.triggered.connect(lambda: self.update_action("MSCROLL"))
-
-        # Save setup
-        save_file = QAction("Save", self)
-        save_file.triggered.connect(self.save_action)
-
-        # Adds all options to the menu.
-        set_mouse.addAction(set_tracking)
-        set_mouse.addAction(set_left_mouse)
-        set_mouse.addAction(set_right_mouse)
-        set_mouse.addAction(set_scroll)
-        set_menu.addMenu(set_mouse)
-        set_menu.addAction(set_button)
-        set_menu.addAction(set_macro)
-        file_menu.addMenu(set_menu)
-        file_menu.addAction(save_file)
-        self.addMenu(file_menu)
-
-    def save_action(self):
+    def save(self):
         '''
         Saves all elements to file.
         '''
         # Saves data.
         with open("data.json", "w+") as f:
-            to_save = json.dumps(self.parent.key_tree, indent=4, sort_keys=True)
+            to_save = json.dumps(self.ele_tree, indent=4, sort_keys=True)
             f.write(to_save)
 
-        # Updates tree based on the save.
         with open("data.json", "r") as f:
-            self.parent.key_tree = json.load(f)
+            self.ele_tree = json.load(f)
 
         # Updates options and title.
-        self.parent.setWindowTitle("Hand Mouse Calibration")
-        self.parent.options = list(self.parent.key_tree.keys())
-        self.parent.train = True
+        self.setWindowTitle("Hand Mouse Calibration")
+        self.train = len(self.ele_tree.keys()) > 0
 
-    def update_action(self, action):
+    def quit(self):
         '''
-        Updates new key to the key tree.
+        Quits the current program.
+        '''
+        self.tray_quit = True
+        self.close()
+
+    def closeEvent(self, event):
+        if self.tray_quit:
+            self.tray.hide()
+            self.content.stop()
+            self.thread.quit()
+        else:
+            event.ignore()
+            self.hide()
+
+
+class TreeArea(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.wid_lay = QVBoxLayout()
+
+        # Builds the tree area.
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel('Current Settings'))
+        self.scroll_area = QScrollArea()
+        layout.addWidget(self.scroll_area)
+        self.setLayout(layout)
+
+        # Populates the key tree area.
+        for ele in list(parent.ele_tree.keys()):
+            if 'Macro' in ele:
+                _type = 'Macro'
+            elif 'MOUSE' in ele:
+                _type = ele
+            else:
+                _type = 'Key'
+            self.add(_type, ele)
+
+    def add(self, _type, label):
+        '''
+        Adds a element to the scroll area so they are easy
+        to edit and delete.
 
         Parameters
         ----------
-        action: string
-            The key or button to save.
+        _type: str
+            The type of element being added.
+        label: str
+            The label element to add.
+        '''
+        # Key setup
+        new_ele = QWidget()
+        layout = QHBoxLayout()
+        layout.addWidget(QLabel(label))
 
-        Returns
-        -------
-        boolean: If it updated or not.
-        '''
-        self.parent.setWindowTitle("Hand Mouse Calibration*")
-        self.pop_up = PopUp('Count Down', 'Place hand on screen in 3')
-        QTimer.singleShot(1000, lambda: self.pop_up.set_text('Place hand on screen in 2'))
-        QTimer.singleShot(2000, lambda: self.pop_up.set_text('Place hand on screen in 1'))
-        QTimer.singleShot(3000, lambda: self.pop_up.set_text('Keep hand on screen and moving.'))
-        QTimer.singleShot(3000, lambda: self.collect_data(action, 0))
+        # Buttons
+        edit_btn = QPushButton('Edit')
+        edit_btn.clicked.connect(lambda: self.edit(new_ele, _type, label))
+        del_btn = QPushButton('Delete')
+        del_btn.clicked.connect(lambda: self.delete(new_ele, label))
+        layout.addWidget(edit_btn)
+        layout.addWidget(del_btn)
 
-    def collect_data(self, action, i, future_action=[]):
+        # Adds new key
+        widget = QWidget()
+        new_ele.setLayout(layout)
+        self.wid_lay.addWidget(new_ele)
+        widget.setLayout(self.wid_lay)
+
+        self.scroll_area.setWidget(widget)
+
+    def edit(self, ele, _type, label):
+        self.parent.setWindowTitle("Hand Mouse Calibration *")
+        self.parent.edit_area.add(_type, label)
+        self.delete(ele, label)
+
+    def delete(self, ele, label):
         '''
-        Collects the data from the hand.
+        Deletes the element.
+
+        Parameters
+        ----------
+        ele: QWidget
+            The widget of the element that is going to be deleted.
+        label: str
+            The name of the element that is being deleted.
         '''
-        if i != 10:
-            # Gets hand and updates it.
+        self.parent.ele_tree.pop(label,None)
+        ele.deleteLater()
+
+
+class EditArea(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.target = QWidget(self)
+        self.active = None
+
+        # Builds the tree area.
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel('Editting'))
+        self.scroll_area = QScrollArea()
+        layout.addWidget(self.scroll_area)
+        self.setLayout(layout)
+
+        # Keyboard listener.
+        self.listener = keyboard.Listener(on_press=self.on_press)
+        self.listener.start()
+
+    def add(self, _type, label=''):
+        if _type == 'Key':
+            self.target = QWidget()
+            layout = QVBoxLayout()
+            edit = QLineEdit(label)
+            edit.setReadOnly(True)
+            layout.addWidget(edit)
+            set_btn = QPushButton('Set')
+            set_btn.clicked.connect(lambda: self.update(_type, self.active.text()))
+            layout.addWidget(set_btn)
+            self.target.setLayout(layout)
+            self.active = edit
+        elif _type == 'Macro':
+            self.texts = []
+            self.delays = []
+            self.target = QWidget()
+            self.wid_lay = QVBoxLayout()
+            self.target.resize(self.scroll_area.width()-5, self.scroll_area.height()-5)
+            layout = QVBoxLayout()
+            self.target.setLayout(layout)
+            self.scroll = QScrollArea()
+            layout.addWidget(self.scroll)
+            add_btn = QPushButton('Add')
+            add_btn.clicked.connect(lambda: self.add_key())
+            layout.addWidget(add_btn)
+            set_btn = QPushButton('Set')
+            set_btn.clicked.connect(self.set_macro)
+            layout.addWidget(set_btn)
+
+            # Add all from label
+            if label != '':
+                values = label.split(' ')[1:]
+                for val in values:
+                    cur = val.split(':')
+                    self.add_key(cur[0], int(cur[1]))
+        else:
+            self.target = QWidget()
+            layout = QVBoxLayout()
+            edit = QLineEdit(_type)
+            edit.setReadOnly(True)
+            layout.addWidget(edit)
+            set_btn = QPushButton('Set')
+            set_btn.clicked.connect(lambda: self.update(_type, _type))
+            layout.addWidget(set_btn)
+            self.target.setLayout(layout)
+            self.active = None
+
+        self.parent.predict = False
+        self.scroll_area.setWidget(self.target)
+
+    def update(self, _type, label, i=0):
+        '''
+        Adds/Updates an element in the tree with its data.
+
+        Parameters
+        ----------
+        label: str
+            The label of the element to add/update.
+        '''
+        max_data = 10
+        if label not in self.parent.ele_tree or len(self.parent.ele_tree[label]) < max_data or i < max_data:
+            self.parent.predict = False
+            
+            if label not in self.parent.ele_tree:
+                self.parent.ele_tree[label] = []
+
             dist = self.parent.content.get_dists()
             if len(dist) > 0:
-                temp = future_action.copy()
-                temp.append(dist)
-                QTimer.singleShot(500, lambda: self.collect_data(action, i+1, temp))
-            # Cancels tree update.
+                self.parent.ele_tree[label].append(dist)
+                if i+1 != max_data:
+                    print(f'Collecting data point {i+2} in 500ms.')
+                else:
+                    print('Completed!')
+                QTimer.singleShot(500, lambda: self.update(_type, label, i+1))
             else:
-                self.pop_up.set_text('Hand left screen, calibration canceled.')
-                self.parent.menu.set_menu.updated.setText(action + " failed to update...")
-                QTimer.singleShot(1000, lambda: self.pop_up.close())
+                print(f'Collecting data point {i+1} in 500ms.')
+                QTimer.singleShot(500, lambda: self.update(_type, label, i))
         else:
-            # Updates tree.
-            self.parent.key_tree[action] = future_action
-            self.parent.menu.set_menu.updated.setText(action + " updated...")
-            self.pop_up.close()
+            self.parent.setWindowTitle('Hand Mouse Calibration *')
+            self.active = None
+            self.target.deleteLater()
 
-    def show_menu(self, content):
+            if len(self.parent.ele_tree.keys()) != self.parent.tree_area.wid_lay.count():
+                self.parent.tree_area.add(_type, label)
+
+            self.parent.predict = self.parent.model is not None
+
+    def add_key(self, key='', delay=0):
         '''
-        Shows the content as a pop up window
+        Class that adds a key to the macro element.
         '''
-        self.parent.predict = False
-        self.set_menu = content
-        content.show()
+        # Main widget
+        widget = QWidget()
+        layout = QHBoxLayout()
+
+        # Label
+        edit = QLineEdit(key)
+        edit.setReadOnly(True)
+        layout.addWidget(edit,stretch=3)
+
+        # Delay
+        dlay = QSpinBox()
+        dlay.setRange(0, 99999)
+        dlay.setSuffix('ms')
+        dlay.setValue(delay)
+        layout.addWidget(dlay,stretch=2)
+        
+        # Buttons
+        edit_btn = QPushButton('Edit')
+        edit_btn.clicked.connect(lambda: self.set_active(edit))
+        layout.addWidget(edit_btn, stretch=1)
+        del_btn = QPushButton('Delete')
+        index = self.wid_lay.count()
+        del_btn.clicked.connect(lambda: self.del_macro(widget, index))
+        layout.addWidget(del_btn, stretch=1)
+
+        # Brings it all together.
+        parent = QWidget()
+        widget.setLayout(layout)
+        self.wid_lay.addWidget(widget)
+        parent.setLayout(self.wid_lay)
+        self.scroll.setWidget(parent)
+
+        # Keeps track of text and delays.
+        self.texts.append(edit)
+        self.delays.append(dlay)
+        self.active = edit
+
+    def set_macro(self):
+        '''
+        Sets the new macro in the tree.
+        '''
+        macro_str = 'Macro:'
+        for i in range(len(self.texts)):
+            macro_str += f' {self.texts[i].text()}:{self.delays[i].value()}'
+        self.update('Macro', macro_str)
+
+    def del_macro(self, target, index):
+        self.texts.pop(index)
+        self.delays.pop(index)
+        self.active = None
+        target.deleteLater()
+
+    def set_active(self, target):
+        '''
+        Sets the active value to the target.
+
+        Parameters
+        ----------
+        target: QWidget
+            The widget that is now active.
+        '''
+        self.active = target
+
+    def on_press(self, key):
+        res = str(key).strip("\'").replace("Key.", "").upper()
+        
+        # Prevents missing '.
+        if res == "":
+            res = "\'"
+
+        # Updates key.
+        if self.active:
+            self.active.setText(res)
 
 
 class Content(QObject):
@@ -243,7 +446,6 @@ class Content(QObject):
         self.cam = cv2.VideoCapture(0)
         self.ht = HandTracking()
         self.parent = parent
-        self.listener = keyboard.Listener(on_press=self.on_press)
         
         # Camera settings
         self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -264,19 +466,6 @@ class Content(QObject):
 
         # Updates the camera.
         self.running = self.cam.isOpened()
-        self.listener.start()
-
-    def on_press(self, key):
-        res = str(key).strip("\'").replace("Key.", "").upper()
-        
-        # Prevents missing '.
-        if res == "":
-            res = "\'"
-
-        if self.parent.get_key:
-            self.parent.menu.set_key.text_box.setText(res)
-        if self.parent.get_macro:
-            self.parent.menu.set_macro.active.setText(res)
 
     def stop(self):
         '''
@@ -284,7 +473,6 @@ class Content(QObject):
         '''
         self.running = False
         self.cam.release()
-        self.listener.stop()
         cv2.destroyAllWindows()
 
     def get_dists(self):
@@ -355,13 +543,13 @@ class Content(QObject):
                 self.parent.label.setPixmap(QPixmap.fromImage(qt_img))
             
             # Make the hand prediction.
-            if self.parent.predict and len(self.parent.options) > 0:
+            if self.parent.predict and len(self.parent.ele_tree.keys()) > 0 and len(self.parent.ele_tree.keys()) <= 40:
                 dist = self.get_dists()
                 if len(dist) >= 20:
                     dist.extend([0] * 20) if len(dist) < 40 else dist
                     pred = models.predict_ffn(dist, self.parent.model)
                     if pred[1] > 0.99:
-                        print(self.parent.options[pred[0]])
+                        print(list(self.parent.ele_tree.keys())[pred[0]])
 
             # Trains the model.
             if self.parent.train:
@@ -372,219 +560,17 @@ class Content(QObject):
                 # Sends the data to the model to train it.
                 data = []
                 targets = []
-                for i, key in enumerate(self.parent.key_tree):
-                    eles = self.parent.key_tree[key]
+                for i, key in enumerate(self.parent.ele_tree):
+                    eles = self.parent.ele_tree[key]
                     for ele in eles:
-                        target = [0] * len(self.parent.options)
+                        target = [0] * len(self.parent.ele_tree.keys())
                         ele.extend([0] * 20) if len(ele) < 40 else ele
                         data.append(ele)
                         target[i] = 1
                         targets.append(target)
 
                 # Updates our model. (saves it too)
-                self.parent.model = models.train_ffn(data, targets, 80, len(self.parent.key_tree))
-
-
-class SetKeyMenu(QWidget):
-    def __init__(self, parent):
-        '''
-        Creates the set key menu.
-
-        Parameters
-        ----------
-        parent: PyQtElement
-            The very top level element of the menu system.
-        '''
-        super().__init__()
-        self.setWindowTitle("Set Key")
-        self.parent = parent
-        self.parent.get_key = True
-
-        # Set key button.
-        set_key = QPushButton("Set Key", self)
-        set_key.clicked.connect(lambda: self.parent.menu.update_action(self.text_box.text()))
-
-        # Key display
-        self.text_box = QLineEdit(self)
-        self.text_box.setReadOnly(True)
-
-        # Update display
-        self.updated = QLabel("Waiting...",self)
-
-        # Layout
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Press key to set:", self))
-        layout.addWidget(self.text_box)
-        layout.addWidget(self.updated)
-        layout.addWidget(set_key)
-        self.setLayout(layout)
-        
-
-    def closeEvent(self, event):
-        '''
-        Stops getting key strokes.
-
-        Parameters
-        ----------
-        event: PyQtEvent
-            The event that caused the event to fire.
-        '''
-        self.parent.get_key = False
-        self.parent.predict = True
-
-
-class SetMacroMenu(QWidget):
-    def __init__(self, parent):
-        super().__init__()
-        self.setWindowTitle('Set Macro')
-        self.parent = parent
-        self.parent.get_macro = True
-        self.text_boxes = []
-        self.keys = []
-        self.delays = []
-        self.target = 0
-        self.active = None
-
-        # Buttons.
-        buttons = QWidget(self)
-        but_lay = QHBoxLayout()
-        set_macro = QPushButton('Set Macro', self)
-        set_macro.clicked.connect(self.set_macro)
-        add_key = QPushButton('Add Key',self)
-        add_key.clicked.connect(self.add_key)
-        del_key = QPushButton('Delet Key', self)
-        del_key.clicked.connect(self.del_key)
-
-        # Button layout.
-        but_lay.addWidget(add_key)
-        but_lay.addWidget(set_macro)
-        but_lay.addWidget(del_key)
-        buttons.setLayout(but_lay)
-        
-
-        # Update display
-        self.updated = QLabel('Waiting...',self)
-        self.label = QLabel('Editing Key 1:', self)
-
-        # Layout
-        self.layout = QVBoxLayout()
-        self.layout.addWidget(self.label)
-        self.layout.addWidget(self.updated)
-        self.layout.addWidget(buttons)
-        self.setLayout(self.layout)
-        self.add_key()
-
-    def add_key(self):
-        '''
-        Adds a key to the macro.
-        '''
-        # Key display
-        key_in = QWidget(self)
-        key_in_layout = QHBoxLayout()
-        text_box = QLineEdit(key_in)
-        text_box.setReadOnly(True)
-        delay = QSpinBox(key_in)
-        delay.setRange(0, 99999)
-        ms = QLabel('ms',key_in)
-        cur = len(self.text_boxes)
-        edit = QPushButton(key_in)
-        edit.setIcon(QIcon(QPixmap('assets/edit.png')))
-        edit.clicked.connect(lambda: self.edit_btn(cur))
-
-        # Sets the layout up.
-        key_in_layout.addWidget(text_box,stretch=3)
-        key_in_layout.addWidget(delay,stretch=2)
-        key_in_layout.addWidget(ms,stretch=1)
-        key_in_layout.addWidget(edit,stretch=1)
-        key_in.setLayout(key_in_layout)
-
-        # Updates key array and active.
-        self.keys.append(key_in)
-        self.delays.append(delay)
-        self.text_boxes.append(text_box)
-        self.active = text_box
-        self.target = cur
-        self.layout.insertWidget(len(self.text_boxes),key_in)
-        self.label.setText(f'Editing Key {self.target+1}:')
-
-    def set_macro(self):
-        '''
-        Sets the macro in the key tree.
-        '''
-        macro_str = 'Macro:'
-        for i in range(len(self.keys)):
-            macro_str += f' {self.text_boxes[i].text()}:{self.delays[i].value()}'
-        self.parent.menu.update_action(macro_str)
-
-    def del_key(self):
-        '''
-        Deletes a key.
-        '''
-        if len(self.keys) > 1:
-            self.delays.pop(self.target)
-            self.text_boxes.pop(self.target)
-            self.keys.pop(self.target).deleteLater()
-            
-            if self.target >= len(self.keys):
-                self.target = len(self.keys) - 1
-            
-            self.active = self.text_boxes[self.target]
-            self.label.setText(f'Editing Key {self.target+1}:')
-
-    def edit_btn(self, target):
-        '''
-        Informs the user of what they are
-        currently editing and changes the target.
-
-        Parameters
-        ----------
-        target: int
-            The index of the text box that will be edited.
-        '''
-        self.active = self.text_boxes[target]
-        self.label.setText(f'Editing Key {target+1}:')
-        self.target = target
-
-    def closeEvent(self, event):
-        '''
-        Stops getting key strokes.
-
-        Parameters
-        ----------
-        event: PyQtEvent
-            The event that caused the event to fire.
-        '''
-        self.parent.get_macro = False
-        self.parent.predict = True
-
-
-class PopUp(QWidget):
-    '''
-    Class display a popup menu.
-    '''
-    def __init__(self, title, text):
-        '''
-        Creates the initial popup.
-
-        Parameters
-        ----------
-        title: str
-            The title of the popup window.
-        text: str
-            The text to display in the popup window.
-        '''
-        super().__init__()
-        self.setWindowModality(Qt.ApplicationModal)
-        self.setWindowTitle(title)
-        layout = QHBoxLayout(self)
-        self.label = QLabel(text, self)
-        layout.addWidget(self.label)
-        self.setLayout(layout)
-        self.show()
-
-
-    def set_text(self, text):
-        self.label.setText(text)
+                self.parent.model = models.train_ffn(data, targets, 80, len(self.parent.ele_tree))
 
 
 class HandTracking:
@@ -612,8 +598,9 @@ class HandTracking:
                 lms.append(hand)
         return lms
 
-# Starts everything up.
+
 if __name__ == '__main__':
+    # Starts everything up.
     app = QApplication(sys.argv)
     app.setWindowIcon(app.style().standardIcon(QStyle.SP_ComputerIcon))
     win = CalibrationUI()
