@@ -2,20 +2,24 @@ import sys
 import cv2
 import time
 import mediapipe as mp
-from pynput import keyboard
+from pynput.keyboard import Key, Controller, Listener
 import math as m
 import json
 import os
+import ctypes
+import numpy as np
 
 from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer, QRect
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import QIcon, QPixmap, QImage
-
-# Custom imports.
 import models
+import mouse
 
-# TODO: Let window be resizeable.
 # TODO: Prevent empty binds.
+# TODO: Add type once or repeat options. 
+
+w = ctypes.windll.user32.GetSystemMetrics(78)
+h = ctypes.windll.user32.GetSystemMetrics(79)
 
 class CalibrationUI(QMainWindow):
     '''
@@ -43,7 +47,7 @@ class CalibrationUI(QMainWindow):
         self.train = False
 
         # Keyboard controler.
-        self.key_ctrl = keyboard.Controller()
+        self.key_ctrl = Controller()
         self.get_key = False
         self.get_macro = False
 
@@ -62,11 +66,17 @@ class CalibrationUI(QMainWindow):
         self.tree_area = TreeArea(self)
         self.edit_area = EditArea(self)
         self.label = QLabel()
+        self.label.setStyleSheet("background-color: #000000")
+        self.label.setMinimumSize(100, 100)
         sub_lay.addWidget(self.tree_area,stretch=1)
         sub_lay.addWidget(self.edit_area,stretch=1)
         sub_widget.setLayout(sub_lay)
-        layout.addWidget(sub_widget, stretch=1)
-        layout.addWidget(self.label, stretch=2)
+        sub_widget.setMinimumSize(100, 100)
+        spliter = QSplitter(Qt.Horizontal)
+        spliter.addWidget(sub_widget)
+        spliter.addWidget(self.label)
+        spliter.setSizes([100,200])
+        layout.addWidget(spliter)
         main.setLayout(layout)
 
         # Thread for content to update on.
@@ -260,7 +270,7 @@ class EditArea(QWidget):
         self.setLayout(layout)
 
         # Keyboard listener.
-        self.listener = keyboard.Listener(on_press=self.on_press)
+        self.listener = Listener(on_press=self.on_press)
         self.listener.start()
 
     def add(self, _type, label=''):
@@ -418,7 +428,7 @@ class EditArea(QWidget):
         self.active = target
 
     def on_press(self, key):
-        res = str(key).strip("\'").replace("Key.", "").upper()
+        res = str(key).strip("\'").replace("Key.", "").lower()
         
         # Prevents missing '.
         if res == "":
@@ -448,8 +458,7 @@ class Content(QObject):
         self.parent = parent
         
         # Camera settings
-        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.resolution = [self.cam.get(cv2.CAP_PROP_FRAME_WIDTH), self.cam.get(cv2.CAP_PROP_FRAME_HEIGHT)]
 
         # Determinds the fps of the camera if it could not be found.
         if self.cam.get(cv2.CAP_PROP_FPS) == 0:
@@ -466,6 +475,9 @@ class Content(QObject):
 
         # Updates the camera.
         self.running = self.cam.isOpened()
+        self.last_key = None
+        self.last_res = None
+        self.mode = None
 
     def stop(self):
         '''
@@ -513,6 +525,18 @@ class Content(QObject):
 
         return dists
 
+    def press_key(self, key):
+        if key in dir(Key):
+            key = Key[key]
+
+        # Press the key if it is not pressed.
+        if self.last_key != key:
+            if key:
+                self.parent.key_ctrl.press(key)
+            if self.last_key:
+                self.parent.key_ctrl.release(self.last_key)
+            self.last_key = key
+        
     def update_loop(self):
         '''
         Gets the current image and displays it in the content.
@@ -523,6 +547,10 @@ class Content(QObject):
 
             # Checking if we are able to detect the hand...
             img = self.ht.find_hands(frame)
+            lms = self.ht.find_landmarks()
+            ratio = self.resolution[0]/self.resolution[1]
+            if self.parent.label.width() > 5:
+                img = cv2.resize(img, (self.parent.label.width()-5, int((self.parent.label.width()-5)/ratio)), interpolation=cv2.INTER_AREA)
 
             # Gets image format
             if img.shape[2] == 4:
@@ -542,14 +570,56 @@ class Content(QObject):
             if not self.parent.isHidden():
                 self.parent.label.setPixmap(QPixmap.fromImage(qt_img))
             
+            if self.mode == 'MOVE':
+                if len(lms) > 0:
+                    pos = self.ht.get_pos(lms[0][0])
+                    mouse.move(pos[0], pos[1], absolute=True, duration=0.01)
+
+            if self.mode == 'SCROLL':
+                if len(lms) > 0:
+                    pos = self.ht.get_pos(lms[0][0])
+                    mouse.wheel(-((pos[1]+(h/4))/(h/2) - 1.5))
+
             # Make the hand prediction.
             if self.parent.predict and len(self.parent.ele_tree.keys()) > 0 and len(self.parent.ele_tree.keys()) <= 40:
                 dist = self.get_dists()
                 if len(dist) >= 20:
                     dist.extend([0] * 20) if len(dist) < 40 else dist
+                    dist = dist[:40]
                     pred = models.predict_ffn(dist, self.parent.model)
-                    if pred[1] > 0.99:
-                        print(list(self.parent.ele_tree.keys())[pred[0]])
+                    if pred[1] > 0.75:
+                        res = list(self.parent.ele_tree.keys())[pred[0]]
+                        if 'Macro' in res:
+                            strokes = res.split(' ')[1:]
+                            for stroke in strokes:
+                                press = stroke.split(':')
+                                self.press_key(press[0])
+                                time.sleep(int(press[1]) / 1000)
+                            self.press_key(None)
+                        elif 'MOUSE' in res:
+                            if res != self.last_res:
+                                if res == 'MOUSEMOVE':
+                                    if self.mode == 'MOVE':
+                                        self.mode = None
+                                    else:
+                                        self.mode = 'MOVE'
+                                    print('Mode Switched')
+                                elif res == 'MOUSELEFT':
+                                    mouse.click('left')
+                                elif res == 'MOUSERIGHT':
+                                    mouse.click('right')
+                                elif res =='MOUSESCROLL':
+                                    if self.mode == 'SCROLL':
+                                        self.mode = None
+                                    else:
+                                        self.mode = 'SCROLL'
+                                    print('Mode Switched')
+                                self.last_res = res
+                            self.press_key(None)
+                        else:
+                            self.press_key(res)
+                    else:
+                        self.press_key(None)
 
             # Trains the model.
             if self.parent.train:
@@ -587,6 +657,13 @@ class HandTracking:
                 connections = self.mp_hands.HAND_CONNECTIONS
                 self.mp_draw.draw_landmarks(img, hand_lms, connections)
         return img
+
+    def get_pos(self, point):
+        b = w/4
+
+        newx = point[0] * (w + b*2) - b
+        newy = point[1] * (h + b*2) - b
+        return [newx, newy]
 
     def find_landmarks(self):
         lms = []
