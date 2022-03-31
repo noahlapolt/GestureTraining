@@ -15,6 +15,7 @@ from PyQt5.QtGui import QIcon, QPixmap, QImage
 import models
 import mouse
 
+# Noah's TODOs:
 # TODO: Prevent empty binds.
 # TODO: Add type once or repeat options. 
 
