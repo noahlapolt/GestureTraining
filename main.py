@@ -18,6 +18,10 @@ import mouse
 # TODO: Prevent empty binds.
 # TODO: Add type once or repeat options. 
 
+# Craig's TODOs:
+# TODO: Improve mouse smoothing
+# TODO: Fix left/right/scroll locks
+
 w = ctypes.windll.user32.GetSystemMetrics(78)
 h = ctypes.windll.user32.GetSystemMetrics(79)
 
