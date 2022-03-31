@@ -37,17 +37,10 @@ class CalibrationUI(QMainWindow):
         if not os.path.exists('data.json'):
             with open("data.json", "w+") as f:
                 f.write('{}')
-                while True:
-                    try:
-                        json.load(f)
-                        break
-                    except:
-                        time.sleep(0.1)
-                self.ele_tree = json.load(f)
-        else:
-            # Updates key tree if there is data.
-            with open("data.json", "r") as f:
-                self.ele_tree = json.load(f)
+                
+        # Updates key tree if there is data.
+        with open("data.json", "r") as f:
+            self.ele_tree = json.load(f)
 
         # Loads the model.
         if len(self.ele_tree.keys()) > 0:
