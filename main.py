@@ -9,7 +9,7 @@ import os
 import ctypes
 import numpy as np
 
-from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer, QRect
+from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer, QRect, pyqtSignal
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import QIcon, QPixmap, QImage
 import models
@@ -17,7 +17,8 @@ import mouse
 
 # Noah's TODOs:
 # TODO: Prevent empty binds.
-# TODO: Add type once or repeat options. 
+# TODO: Add type once or repeat options.
+# TODO: Add default bind.
 
 # Craig's TODOs:
 # TODO: Improve mouse smoothing
@@ -84,10 +85,12 @@ class CalibrationUI(QMainWindow):
         main.setLayout(layout)
 
         # Thread for content to update on.
+        self.progress = QProgressBar()
         self.thread = QThread()
         self.content = Content(self)
         self.content.moveToThread(self.thread)
         self.thread.started.connect(self.content.update_loop)
+        self.content.progress.connect(lambda p: self.progress.setValue(p))
 
         # Tray setup
         tray_menu = QMenu(self)
@@ -444,6 +447,7 @@ class EditArea(QWidget):
 
 
 class Content(QObject):
+    progress = pyqtSignal(int)
     '''
     Displays the camera input for the calibration.
     '''
@@ -628,8 +632,9 @@ class Content(QObject):
             # Trains the model.
             if self.parent.train:
                 self.parent.train = False
-                if not self.parent.isHidden():
-                    self.parent.label.setText('Training')
+                splitter = self.parent.layout().itemAt(0).widget() \
+                    .layout().itemAt(0).widget()
+                splitter.replaceWidget(1, self.parent.progress)
 
                 # Sends the data to the model to train it.
                 data = []
@@ -644,7 +649,9 @@ class Content(QObject):
                         targets.append(target)
 
                 # Updates our model. (saves it too)
-                self.parent.model = models.train_ffn(data, targets, 80, len(self.parent.ele_tree))
+                self.parent.model = models.train_ffn(data, targets, 80, \
+                    len(self.parent.ele_tree), self.progress)
+                splitter.replaceWidget(1, self.parent.label)
 
 
 class HandTracking:

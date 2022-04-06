@@ -36,7 +36,7 @@ class FFN(torch.nn.Module):
 
         return self.output_layer(relu)
 
-def train_ffn(data, targets, hidden_size, output_size, lr=1e-4):
+def train_ffn(data, targets, hidden_size, output_size, progress, lr=1e-4):
     # Shuffles the data.
     temp = list(zip(data, targets))
     random.shuffle(temp)
@@ -52,8 +52,9 @@ def train_ffn(data, targets, hidden_size, output_size, lr=1e-4):
     model = FFN(hidden_size, output_size).to(device)
     criterion = torch.nn.MSELoss(reduction='sum').to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    max_epoch = 50000
 
-    for t in range(50000):
+    for t in range(max_epoch):
         # Forward pass: Compute predicted y by passing x to the model
         y_pred = model(x)
 
@@ -65,6 +66,7 @@ def train_ffn(data, targets, hidden_size, output_size, lr=1e-4):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        progress.emit(int((t/max_epoch) * 100))
 
     # Saves the file.
     torch.save(model.state_dict(), 'model.ct')
