@@ -8,6 +8,7 @@ import json
 import os
 import ctypes
 import numpy as np
+import torch
 
 from PyQt5.QtCore import QThread, Qt, QObject, QEvent, QTimer, QRect, pyqtSignal
 from PyQt5.QtWidgets import *
@@ -651,6 +652,7 @@ class Content(QObject):
                 # Updates our model. (saves it too)
                 self.parent.model = models.train_ffn(data, targets, 80, \
                     len(self.parent.ele_tree), self.progress)
+                self.parent.predict = True
                 splitter.replaceWidget(1, self.parent.label)
 
 
