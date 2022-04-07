@@ -607,14 +607,13 @@ class Content(QObject):
                             self.press_key(None)
                         elif 'MOUSE' in res:
                             if res != self.last_res:
+                                mouse.release('left')
                                 if res == 'MOUSEMOVE':
-                                    if self.mode == 'MOVE':
-                                        self.mode = None
-                                    else:
+                                    if self.mode != 'MOVE':
                                         self.mode = 'MOVE'
                                     print('Mode Switched')
                                 elif res == 'MOUSELEFT':
-                                    mouse.click('left')
+                                    mouse.press('left')
                                 elif res == 'MOUSERIGHT':
                                     mouse.click('right')
                                 elif res =='MOUSESCROLL':
