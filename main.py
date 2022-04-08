@@ -461,7 +461,10 @@ class Content(QObject):
             The Qt element right above this object.
         '''
         super().__init__()
-        self.cam = cv2.VideoCapture(0)
+        self.cam = cv2.VideoCapture(1)
+        cap = cv2.VideoCapture(1)
+        if cap is None or not cap.isOpened():
+            self.cam = cv2.VideoCapture(0)
         self.ht = HandTracking()
         self.parent = parent
         
