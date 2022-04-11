@@ -26,6 +26,7 @@ import mouse
 
 w = ctypes.windll.user32.GetSystemMetrics(78)
 h = ctypes.windll.user32.GetSystemMetrics(79)
+hidden_size = 1000
 
 class CalibrationUI(QMainWindow):
     '''
@@ -45,7 +46,10 @@ class CalibrationUI(QMainWindow):
 
         # Loads the model.
         if len(self.ele_tree.keys()) > 0:
-            self.model = models.FFN(80, len(self.ele_tree.keys()))
+            self.model = models.FFN(
+                len(self.ele_tree[list(self.ele_tree.keys())[0]][0]),
+                hidden_size,
+                len(self.ele_tree.keys()))
         else:
             self.model = None
         self.predict = self.model is not None
@@ -141,6 +145,11 @@ class CalibrationUI(QMainWindow):
         add_scroll = QAction('&Scroll', add_mouse)
         add_scroll.triggered.connect(lambda: self.edit_area.add('MOUSESCROLL'))
         add_mouse.addAction(add_scroll)
+
+        # Default
+        add_default = QAction('Default', add_menu)
+        add_default.triggered.connect(lambda: self.edit_area.add('DEFAULT'))
+        add_menu.addAction(add_default)
 
         # Setup window.
         self.setMenuBar(menu)
@@ -346,9 +355,9 @@ class EditArea(QWidget):
             if label not in self.parent.ele_tree:
                 self.parent.ele_tree[label] = []
 
-            dist = self.parent.content.get_dists()
-            if len(dist) > 0:
-                self.parent.ele_tree[label].append(dist)
+            data = self.parent.content.get_data()
+            if len(data) > 0:
+                self.parent.ele_tree[label].append(data)
                 if i+1 != max_data:
                     print(f'Collecting data point {i+2} in 500ms.')
                 else:
@@ -495,43 +504,29 @@ class Content(QObject):
         self.cam.release()
         cv2.destroyAllWindows()
 
-    def get_dists(self):
-        '''
-        Function to get the current distances to save as a profile.
-        
-        Returns
-        -------
-        float[]: List of all distances between important joints.
-        '''
-        lms = self.ht.find_landmarks()
-        dists = []
+    def get_data(self, lms=None):
+        data = []
+        if lms is None:
+            lms = self.ht.find_landmarks()
 
         for i in range(len(lms)):
-            if len(lms[i]) >= 20:
-                # Collects distances from joints.
+            if len(lms[i]) >= 21:
+                # Collects data from joints.
                 base = m.dist(lms[i][0], lms[i][5])
-                dists.append(m.dist(lms[i][0], lms[i][1])/base)
-                dists.append(m.dist(lms[i][1], lms[i][2])/base)
-                dists.append(m.dist(lms[i][2], lms[i][3])/base)
-                dists.append(m.dist(lms[i][3], lms[i][4])/base)
-                dists.append(m.dist(lms[i][0], lms[i][5])/base)
-                dists.append(m.dist(lms[i][5], lms[i][6])/base)
-                dists.append(m.dist(lms[i][6], lms[i][7])/base)
-                dists.append(m.dist(lms[i][7], lms[i][8])/base)
-                dists.append(m.dist(lms[i][0], lms[i][9])/base)
-                dists.append(m.dist(lms[i][9], lms[i][10])/base)
-                dists.append(m.dist(lms[i][10], lms[i][11])/base)
-                dists.append(m.dist(lms[i][11], lms[i][12])/base)
-                dists.append(m.dist(lms[i][0], lms[i][13])/base)
-                dists.append(m.dist(lms[i][13], lms[i][14])/base)
-                dists.append(m.dist(lms[i][14], lms[i][15])/base)
-                dists.append(m.dist(lms[i][15], lms[i][16])/base)
-                dists.append(m.dist(lms[i][0], lms[i][17])/base)
-                dists.append(m.dist(lms[i][17], lms[i][18])/base)
-                dists.append(m.dist(lms[i][18], lms[i][19])/base)
-                dists.append(m.dist(lms[i][19], lms[i][20])/base)
+                angle = m.atan2(lms[i][0][1]-lms[i][5][1],lms[i][0][0]-lms[i][5][0])
+                for point1 in lms[i]:
+                    for point2 in lms[i]:
+                        if point1 != point2:
+                            data.append((m.dist(point1, point2)/base)*(angle-m.atan2(point1[1]-point2[1], point1[0]-point2[0])))
 
-        return dists
+        # Returns empty array if not enough data.
+        if len(data) < 420:
+            return []
+
+        # Corrects data shape.
+        data.extend([0] * 420) if len(data) < 840 else data
+        data = data[:840]
+        return data
 
     def press_key(self, key):
         if key in dir(Key):
@@ -589,48 +584,48 @@ class Content(QObject):
                     mouse.wheel(-((pos[1]+(h/4))/(h/2) - 1.5))
 
             # Make the hand prediction.
-            if self.parent.predict and len(self.parent.ele_tree.keys()) > 0 and len(self.parent.ele_tree.keys()) <= 40:
-                dist = self.get_dists()
-                if len(dist) >= 20:
-                    dist.extend([0] * 20) if len(dist) < 40 else dist
-                    dist = dist[:40]
-                    pred = models.predict_ffn(dist, self.parent.model)
-                    if pred[1] > 0.75:
-                        res = list(self.parent.ele_tree.keys())[pred[0]]
-                        if 'Macro' in res:
-                            strokes = res.split(' ')[1:]
-                            for stroke in strokes:
-                                press = stroke.split(':')
-                                self.press_key(press[0])
-                                time.sleep(int(press[1]) / 1000)
-                            self.press_key(None)
-                        elif 'MOUSE' in res:
-                            if res != self.last_res:
-                                mouse.release('left')
-                                if res == 'MOUSEMOVE':
-                                    if self.mode != 'MOVE':
-                                        self.mode = 'MOVE'
-                                    print('Mode Switched')
-                                elif res == 'MOUSELEFT':
-                                    mouse.press('left')
-                                elif res == 'MOUSERIGHT':
-                                    mouse.click('right')
-                                elif res =='MOUSESCROLL':
-                                    if self.mode == 'SCROLL':
-                                        self.mode = None
-                                    else:
-                                        self.mode = 'SCROLL'
-                                    print('Mode Switched')
-                                self.last_res = res
-                            self.press_key(None)
-                        else:
-                            self.press_key(res)
-                    else:
+            if self.parent.predict and not self.parent.train and len(self.parent.ele_tree.keys()) > 0 and len(lms)>0 and len(lms[0])>0:
+                pred = models.predict_ffn(self.get_data(lms), self.parent.model)
+                if pred[1] > 0.75:
+                    res = list(self.parent.ele_tree.keys())[pred[0]]
+                    if 'Macro' in res:
+                        strokes = res.split(' ')[1:]
+                        for stroke in strokes:
+                            press = stroke.split(':')
+                            self.press_key(press[0])
+                            time.sleep(int(press[1]) / 1000)
                         self.press_key(None)
+                    elif 'MOUSE' in res:
+                        if res != self.last_res:
+                            mouse.release('left')
+                            if res == 'MOUSEMOVE':
+                                if self.mode != 'MOVE':
+                                    self.mode = 'MOVE'
+                                print('Mode Switched')
+                            elif res == 'MOUSELEFT':
+                                mouse.press('left')
+                            elif res == 'MOUSERIGHT':
+                                mouse.click('right')
+                            elif res =='MOUSESCROLL':
+                                if self.mode == 'SCROLL':
+                                    self.mode = None
+                                else:
+                                    self.mode = 'SCROLL'
+                                print('Mode Switched')
+                            self.last_res = res
+                        self.press_key(None)
+                    elif 'DEFAULT' in res:
+                        if res != self.last_res:
+                            self.mode = None
+                            self.press_key(None)
+                            self.last_res = 'DEFAULT'
+                    else:
+                        self.press_key(res)
+                else:
+                    self.press_key(None)
 
             # Trains the model.
             if self.parent.train:
-                self.parent.train = False
                 splitter = self.parent.layout().itemAt(0).widget() \
                     .layout().itemAt(0).widget()
                 splitter.replaceWidget(1, self.parent.progress)
@@ -642,16 +637,18 @@ class Content(QObject):
                     eles = self.parent.ele_tree[key]
                     for ele in eles:
                         target = [0] * len(self.parent.ele_tree.keys())
-                        ele.extend([0] * 20) if len(ele) < 40 else ele
                         data.append(ele)
                         target[i] = 1
                         targets.append(target)
 
                 # Updates our model. (saves it too)
-                self.parent.model = models.train_ffn(data, targets, 80, \
-                    len(self.parent.ele_tree), self.progress)
-                self.parent.predict = True
+                self.parent.model = models.train_ffn(data, targets, hidden_size, \
+                    len(self.parent.ele_tree), self.progress, max_epoch=1000)
+                
+                # Exits this if.
+                self.parent.train = False
                 splitter.replaceWidget(1, self.parent.label)
+                self.parent.predict  = self.parent.model is not None
 
 
 class HandTracking:
@@ -682,7 +679,7 @@ class HandTracking:
             for hand_lm in self.results.multi_hand_landmarks:
                 hand = []
                 for lm in hand_lm.landmark:
-                    hand.append((lm.x, lm.y, lm.z))
+                    hand.append((lm.x, lm.y))
                 lms.append(hand)
         return lms
 
